@@ -1,0 +1,13 @@
+{
+  "name": "liquidfun",
+  "url" : "https://github.com/JohnSword/liquidfunx/",
+  "license": "zlib",
+  "tags": ["box2d", "physics"],
+  "description": "",
+  "version": "1.0.0",
+  "classPath": "src/",
+  "releasenote": "",
+  "contributors": ["JohnSword","nafemate"],
+  "dependencies": {
+  }
+}
