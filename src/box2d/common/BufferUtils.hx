@@ -11,7 +11,7 @@ import haxe.ds.Vector;
 
 class BufferUtils {
 
-    public static function reallocateBuffer(klass : Class<Dynamic>, oldBuffer : Vector<Dynamic>, oldCapacity : Int, newCapacity : Int) : Dynamic {
+    public static function reallocateBuffer(oldBuffer : Vector<Dynamic>, oldCapacity : Int, newCapacity : Int) : Dynamic {
         var newBuffer : Vector<Dynamic> = new Vector<Dynamic>(newCapacity);
         if (oldBuffer != null) {
             // TODO: array copy
@@ -20,7 +20,7 @@ class BufferUtils {
         }
         for (i in oldCapacity ... newCapacity) {
             try {
-                newBuffer[i] = Type.createInstance(klass, []);
+                newBuffer[i] = null;
             } catch (e : Dynamic) {
                 throw e;
             }
@@ -197,10 +197,10 @@ class BufferUtils {
      * Reallocate a buffer. A 'deferred' buffer is reallocated only if it is not NULL. If
      * 'userSuppliedCapacity' is not zero, buffer is user supplied and must be kept.
      */
-     public static function reallocateBufferDeffered<T>(klass : Class<Dynamic>, buffer : Vector<Dynamic>, userSuppliedCapacity : Int,
+     public static function reallocateBufferDeffered<T>(buffer : Vector<Dynamic>, userSuppliedCapacity : Int,
          oldCapacity : Int, newCapacity : Int, deferred : Bool) : Dynamic {
         if ((!deferred || buffer != null) && userSuppliedCapacity == 0) {
-            buffer = reallocateBuffer(klass, buffer, oldCapacity, newCapacity);
+            buffer = reallocateBuffer(buffer, oldCapacity, newCapacity);
         }
         return buffer;
     }

@@ -170,7 +170,7 @@ class ParticleSystem {
     m_positionBuffer = new ParticleBufferVec2(Vec2);
     m_velocityBuffer = new ParticleBufferVec2(Vec2);
     m_colorBuffer = new ParticleBufferParticleColor(ParticleColor);
-    m_userDataBuffer = new ParticleBuffer(cast Dynamic);
+    m_userDataBuffer = new ParticleBuffer();
 
     m_proxyBuffer = new Array<Proxy>();
   }
@@ -236,7 +236,7 @@ class ParticleSystem {
     }
     if (m_userDataBuffer.data != null || def.userData != null) {
       m_userDataBuffer.data =
-          requestParticleBuffer(m_userDataBuffer.dataClass, m_userDataBuffer.data);
+          requestParticleBuffer(m_userDataBuffer.data);
       m_userDataBuffer.data[index] = def.userData;
     }
     // if (m_proxyCount >= m_proxyCapacity) {
@@ -1771,7 +1771,7 @@ class ParticleSystem {
 
   // reallocate a buffer
   static private function reallocateBuffer(buffer : Dynamic, oldCapacity : Int, newCapacity : Int, deferred : Bool) : Dynamic {
-    return BufferUtils.reallocateBufferDeffered(buffer.dataClass, buffer.data, buffer.userSuppliedCapacity,
+    return BufferUtils.reallocateBufferDeffered(buffer.data, buffer.userSuppliedCapacity,
         oldCapacity, newCapacity, deferred);
   }
 
@@ -1801,12 +1801,12 @@ class ParticleSystem {
     return buffer;
   }
 
-  private function requestParticleBuffer(klass : Class<Dynamic>, buffer : Vector<Dynamic>) : Vector<Dynamic> {
+  private function requestParticleBuffer(buffer : Vector<Dynamic>) : Vector<Dynamic> {
     if (buffer == null) {
       // buffer = cast Array.newInstance(klass, m_internalAllocatedCapacity);
       buffer = new Vector<Dynamic>(m_internalAllocatedCapacity);
       for(i in 0 ... m_internalAllocatedCapacity) {
-          buffer[i] = Type.createInstance( klass, [] );
+          buffer[i] = null;
       }
     }
     return buffer;
