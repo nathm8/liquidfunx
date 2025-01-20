@@ -84,6 +84,11 @@ class ParticleGroup {
     return m_linearVelocity;
   }
 
+  public function getLinearVelocityFromWorldPoint(point: Vec2) : Vec2 {
+    updateStatistics();
+    return m_linearVelocity.add(Vec2.cross(point.sub(m_center), m_angularVelocity));
+  }
+
   public function getAngularVelocity() : Float {
     updateStatistics();
     return m_angularVelocity;

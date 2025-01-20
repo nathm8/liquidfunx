@@ -25,5 +25,7 @@ package box2d.particle;
   public static var b2_colorMixingParticle : Int = 1 << 8;
   /** call b2DestructionListener on destruction */
   public static var b2_destructionListener : Int = 1 << 9;
+  /** impenetrable to other particles */
+  public static var b2_barrierParticle : Int = 1 << 10;
 }
 

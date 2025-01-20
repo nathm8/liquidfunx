@@ -28,6 +28,55 @@ import box2d.particle.buffers.ParticleBufferParticleColor;
 import haxe.ds.Vector;
 import haxe.ds.ArraySort;
 
+final xTruncBits : Int = 12;
+final yTruncBits : Int = 12;
+final tagBits : Int = 8 * 4 - 1  /* sizeof(int) */;
+final yOffset : Int = 1 << (yTruncBits - 1);
+final yShift : Int = tagBits - yTruncBits;
+final xShift : Int = tagBits - yTruncBits - xTruncBits;
+final xScale : Int = 1 << xShift;
+final xOffset : Int = xScale * (1 << (xTruncBits - 1));
+final yMask : Int = - ((1 << yTruncBits) - 1) << yShift;
+final xMask : Int = ~yMask;
+
+/// InsideBoundsEnumerator enumerates all particles inside the given bounds.
+class InsideBoundsEnumerator {
+  private var m_xLower : Int;
+  private var m_yLower : Int;
+  private var m_xUpper : Int;
+  private var m_yUpper : Int;
+  /// The range of proxies.
+  private var m_first: Int;
+  private var m_last: Int;
+  private var m_proxies: Array<Proxy>;
+
+  /// Construct an enumerator with bounds of tags and a range of proxies.
+  public function new(lower: Int, upper: Int, first: Int, last: Int, proxies: Array<Proxy>) {
+    m_xLower = lower & xMask;
+    m_yLower = lower & yMask;
+    m_xUpper = upper & xMask;
+    m_yUpper = upper & yMask;
+    m_last = last;
+    m_first = first;
+    m_proxies = proxies;
+  }
+
+  /// Get index of the next particle. Returns b2_invalidParticleIndex if
+  /// there are no more particles.
+  public function GetNext(): Int {
+    while (m_first < m_last) {
+      var x_tag = m_proxies[m_first].tag & xMask;
+      if (x_tag >= m_xLower && x_tag <= m_xUpper) {
+        var out = m_proxies[m_first].index;
+        m_first++;
+        return out;
+      }
+      m_first++;
+    }
+    return Settings.invalidParticleIndex;
+  }
+}
+
 class ParticleSystem {
   /** All particle types that require creating pairs */
   public static var k_pairFlags : Int = ParticleType.b2_springParticle;
@@ -35,17 +84,6 @@ class ParticleSystem {
   public static var k_triadFlags : Int = ParticleType.b2_elasticParticle;
   /** All particle types that require computing depth */
   public static var k_noPressureFlags : Int = ParticleType.b2_powderParticle;
-
-  static var xTruncBits : Int = 12;
-  static var yTruncBits : Int = 12;
-  static var tagBits : Int = 8 * 4 - 1  /* sizeof(int) */;
-  static var yOffset : Int = 1 << (yTruncBits - 1);
-  static var yShift : Int = tagBits - yTruncBits;
-  static var xShift : Int = tagBits - yTruncBits - xTruncBits;
-  static var xScale : Int = 1 << xShift;
-  static var xOffset : Int = xScale * (1 << (xTruncBits - 1));
-  static var xMask : Int = - 1;
-  static var yMask : Int = - 1;
 
   static public function computeTag(x : Float, y : Float) : Int {
     // TODO: check this calculation
@@ -772,6 +810,133 @@ class ParticleSystem {
     }
     solvePressure(step);
     solveDamping(step);
+  }
+
+  private static final b2_barrierCollisionTime = 2.5;
+
+  private function GetInsideBoundsEnumerator(aabb: AABB) : InsideBoundsEnumerator {
+    var lower_tag = computeTag(m_inverseDiameter * aabb.lowerBound.x - 1,
+                               m_inverseDiameter * aabb.lowerBound.y - 1);
+    var upper_tag = computeTag(m_inverseDiameter * aabb.upperBound.x - 1,
+                               m_inverseDiameter * aabb.upperBound.y - 1);
+    var first_proxy = lowerBound(m_proxyBuffer, m_proxyCount, lower_tag);
+    var last_proxy = lowerBound(m_proxyBuffer, m_proxyCount, upper_tag);
+    return new InsideBoundsEnumerator(lower_tag, upper_tag, first_proxy, last_proxy, m_proxyBuffer);
+  }
+
+  private function getLinearVelocity(group: ParticleGroup, particle_index: Int, point: Vec2) :Vec2 {
+    if (group.m_groupFlags & ParticleGroupType.b2_rigidParticleGroup != 0)
+      return group.getLinearVelocityFromWorldPoint(point);
+    return m_velocityBuffer.data[particle_index];
+  }
+
+  private function solveBarrier(step: TimeStep) : Void {
+    // If a particle is passing between paired barrier particles,
+	  // its velocity will be decelerated to avoid passing.
+    for (i in 0...m_count) {
+      var flags = m_flagsBuffer.data[i];
+      if (flags & ParticleType.b2_barrierParticle != 0)
+        m_velocityBuffer.data[i].setZero();
+    }
+    var tmax = b2_barrierCollisionTime * step.dt;
+    for (k in 0...m_pairBuffer.length) {
+      var pair = m_pairBuffer[k];
+      if (pair.flags & ParticleType.b2_barrierParticle != 0) {
+        var a = pair.indexA;
+        var b = pair.indexB;
+        var pa = m_positionBuffer.data[a];
+        var pb = m_positionBuffer.data[b];
+        var aabb = new AABB();
+        aabb.lowerBound = Vec2.min(pa, pb);
+        aabb.upperBound = Vec2.max(pa, pb);
+        var a_group = m_groupBuffer[a];
+        var b_group = m_groupBuffer[a];
+        // TODO:
+        // as the pair ab must both be barrier particles, their
+        // velocities must both be zero. A tiny optimisation
+        var va = getLinearVelocity(a_group, a, pa);
+        var vb = getLinearVelocity(b_group, b, pb);
+        var vba = vb.sub(va);
+        var pba = pb.sub(pa);
+        var enumerator = GetInsideBoundsEnumerator(aabb);
+        var c = enumerator.GetNext();
+        while (c >= 0) {
+          var pc = m_positionBuffer.data[c];
+          var c_group = m_groupBuffer[c];
+          if (a_group != c_group && b_group != c_group) {
+            var vc = getLinearVelocity(c_group, c, pc);
+            // Solve the equation below:
+            //   (1-s)*(pa+t*va)+s*(pb+t*vb) = pc+t*vc
+            // which expresses that the particle c will pass a line
+            // connecting the particles a and b at the time of t.
+            // if s is between 0 and 1, c will pass between a and b.
+            var pca = pc.sub(pa);
+            var vca = vc.sub(va);
+            var e2 = Vec2.crossVec(vba, vca);
+            var e1 = Vec2.crossVec(pba, vca) - Vec2.crossVec(pca, vba);
+            var e0 = Vec2.crossVec(pba, pca);
+            var s: Float; var t: Float; var qba: Vec2; var qca: Vec2;
+            if (e2 == 0) {
+              if (e1 == 0) continue;
+              t = - e0 / e1;
+              if (!(t >= 0 && t < tmax)) continue;
+              qba = pba.add(vba.mul(t));
+              qca = pca.add(vca.mul(t));
+              s = Vec2.dot(qba, qca) / Vec2.dot(qba, qba);
+              if (!(s >= 0 && s <= 1)) continue;
+            } else {
+              var det = e1 * e1 - 4 * e0 * e2;
+              if (det < 0) continue;
+              var sqrtDet = Math.sqrt(det);
+              var t1 = (- e1 - sqrtDet) / (2 * e2);
+              var t2 = (- e1 + sqrtDet) / (2 * e2);
+              if (t1 > t2) {
+                var tmp = t2;
+                t2 = t1;
+                t1 = tmp;
+              }
+              t = t1;
+              qba = pba.add(vba.mul(t));
+              qca = pca.add(vca.mul(t));
+              s = Vec2.dot(qba, qca) / Vec2.dot(qba, qba);
+              if (!(t >= 0 && t < tmax && s >= 0 && s <= 1)) {
+                t = t2;
+                if (!(t >= 0 && t < tmax)) continue;
+                qba = pba.add(vba.mul(t));
+                qca = pca.add(vca.mul(t));
+                s = Vec2.dot(qba, qca) / Vec2.dot(qba, qba);
+                if (!(s >= 0 && s <= 1)) continue;
+              }
+            }
+            // Apply a force to particle c so that it will have the
+            // interpolated velocity at the collision point on line ab.
+            var dv = va.add(vba.mul(s).sub(vc));
+            var f = dv.mul(getParticleMass());
+            if (c_group.m_groupFlags & ParticleGroupType.b2_rigidParticleGroup != 0) {
+              // If c belongs to a rigid group, the force will be
+              // distributed in the group.
+              var mass = c_group.getMass();
+              var inertia = c_group.getInertia();
+              if (mass > 0)
+                c_group.m_linearVelocity.addLocalVec(f.mul(1 / mass));
+              if (inertia > 0)
+                c_group.m_angularVelocity += Vec2.crossVec(pc.sub(c_group.getCenter()), f) / inertia;
+            }
+            else
+              m_velocityBuffer.data[c].addLocalVec(dv);
+            // Apply a reversed force to particle c after particle
+            // movement so that momentum will be preserved.
+            particleApplyForce(c, f.mul(-step.inv_dt), step);
+          }
+          c = enumerator.GetNext();
+        }
+      }
+    }
+  }
+
+  public function particleApplyForce(particle_index: Int, force: Vec2, step: TimeStep) : Void {
+    if ((force.x != 0 || force.y != 0) && !(m_flagsBuffer.data[particle_index] & (ParticleType.b2_wallParticle | ParticleType.b2_barrierParticle)== 0 ))
+      m_velocityBuffer.data[particle_index].add(force.mul(step.dt*getParticleInvMass()));
   }
 
   private function solvePressure(step : TimeStep) : Void {
