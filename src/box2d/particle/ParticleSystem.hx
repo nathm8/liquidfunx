@@ -115,6 +115,8 @@ class ParticleSystem {
   public var m_flagsBuffer : ParticleBufferInt;
   public var m_positionBuffer : ParticleBufferVec2;
   public var m_velocityBuffer : ParticleBufferVec2;
+  public var m_staticPressureBuffer : Vector<Float>;
+  public var m_weightBuffer : Vector<Float>;
   public var m_accumulationBuffer : Vector<Float>; // temporary values
   public var m_accumulation2Buffer : Vector<Vec2>; // temporary vector values
   public var m_depthBuffer : Vector<Float>; // distance from the surface
@@ -126,7 +128,6 @@ class ParticleSystem {
   public var m_proxyCount : Int = 0;
   public var m_proxyCapacity : Int = 0;
   public var m_proxyBuffer : Array<Proxy>;
-  // public var m_proxyBuffer : Vector<Proxy>;
 
   public var m_contactCount : Int = 0;
   public var m_contactCapacity : Int = 0;
@@ -157,6 +158,9 @@ class ParticleSystem {
   public var m_powderStrength : Float = 0;
   public var m_ejectionStrength : Float = 0;
   public var m_colorMixingStrength : Float = 0;
+  public var m_staticPressureStrength : Float = 0.2;
+  public var m_staticPressureRelaxation : Float= 0.2;
+  public var m_staticPressureIterations : Int = 8;
 
   private var m_world : World;
 
@@ -787,6 +791,7 @@ class ParticleSystem {
     }
     updateBodyContacts();
     updateContacts(false);
+    computeWeight();
     if ((m_allParticleFlags & ParticleType.b2_viscousParticle) != 0) {
       solveViscous(step);
     }
@@ -808,8 +813,12 @@ class ParticleSystem {
     if ((m_allParticleFlags & ParticleType.b2_colorMixingParticle) != 0) {
       solveColorMixing(step);
     }
+    if ((m_allParticleFlags & ParticleType.b2_staticPressureParticle) != 0)
+      solveStaticPressure(step);
     solvePressure(step);
     solveDamping(step);
+    if ((m_allParticleFlags & ParticleType.b2_staticPressureParticle) != 0)
+      solveExtraDamping();
   }
 
   private static final b2_barrierCollisionTime = 2.5;
@@ -939,6 +948,65 @@ class ParticleSystem {
       m_velocityBuffer.data[particle_index].add(force.mul(step.dt*getParticleInvMass()));
   }
 
+  private function computeWeight() : Void {
+    // calculates the sum of contact-weights for each particle
+	  // that means dimensionless density
+    m_weightBuffer = requestParticleBufferFloat(m_weightBuffer);
+    for (i in 0...m_weightBuffer.length)
+      m_weightBuffer[i] = 0;
+    for (k in 0 ... m_bodyContactCount) {
+      var contact = m_bodyContactBuffer[k];
+      m_weightBuffer[contact.index] += contact.weight;
+    }
+    for (contact in m_contactBuffer) {
+      var a = contact.indexA;
+      var b = contact.indexB;
+      var w = contact.weight;
+      m_weightBuffer[a] += w;
+      m_weightBuffer[b] += w;
+    }
+
+  }
+
+  private function solveStaticPressure(step : TimeStep) : Void {
+    m_staticPressureBuffer = requestParticleBufferFloat(m_staticPressureBuffer);
+    var crit_pressure = getCriticalPressure(step);
+    var pressurePerWeight = m_staticPressureStrength * crit_pressure;
+    var max_pressure =  Settings.maxParticlePressure * crit_pressure;
+    /// Compute pressure satisfying the modified Poisson equation:
+    ///     Sum_for_j((p_i - p_j) * w_ij) + relaxation * p_i =
+    ///     pressurePerWeight * (w_i - b2_minParticleWeight)
+    /// by iterating the calculation:
+    ///     p_i = (Sum_for_j(p_j * w_ij) + pressurePerWeight *
+    ///           (w_i - b2_minParticleWeight)) / (w_i + relaxation)
+    /// where
+    ///     p_i and p_j are static pressure of particle i and j
+    ///     w_ij is contact weight between particle i and j
+    ///     w_i is sum of contact weight of particle i
+    for (t in 0...m_staticPressureIterations) {
+      for(i in 0 ... m_count)
+        m_accumulationBuffer[i] = 0;
+      for (contact in m_contactBuffer) {
+        if (contact.flags & ParticleType.b2_staticPressureParticle != 0) {
+          var a = contact.indexA;
+          var b = contact.indexB;
+          var w = contact.weight;
+          m_accumulationBuffer[a] += w * m_staticPressureBuffer[b];
+          m_accumulationBuffer[b] += w * m_staticPressureBuffer[a];
+        }
+      }
+      for (i in 0...m_count) {
+        var w = m_weightBuffer[i];
+        if (m_flagsBuffer.data[i] & ParticleType.b2_staticPressureParticle != 0) {
+          var wh = m_accumulationBuffer[i];
+          var h = (wh + pressurePerWeight *(w - Settings.minParticleWeight))/(w + m_staticPressureRelaxation);
+          m_staticPressureBuffer[i] = Math.max(0, Math.min(h, max_pressure));
+        } else
+          m_staticPressureBuffer[i] = 0;
+      }
+    }
+  }
+
   private function solvePressure(step : TimeStep) : Void {
     // calculates the sum of contact-weights for each particle
     // that means dimensionless density
@@ -964,6 +1032,14 @@ class ParticleSystem {
       for(i in 0 ... m_count) {
         if ((m_flagsBuffer.data[i] & k_noPressureFlags) != 0) {
           m_accumulationBuffer[i] = 0;
+        }
+      }
+    }
+    // static pressure
+    if (m_allParticleFlags & ParticleType.b2_staticPressureParticle != 0) {
+      for(i in 0 ... m_count) {
+        if ((m_flagsBuffer.data[i] & ParticleType.b2_staticPressureParticle) != 0) {
+          m_accumulationBuffer[i] += m_staticPressureBuffer[i];
         }
       }
     }
@@ -1013,6 +1089,29 @@ class ParticleSystem {
       velDataA.y -= fy;
       velDataB.x += fx;
       velDataB.y += fy;
+    }
+  }
+
+  private function solveExtraDamping() : Void {
+    // Applies additional damping force between bodies and particles which can
+    // produce strong repulsive force. Applying damping force multiple times
+    // is effective in suppressing vibration.
+    for (k in 0...m_bodyContactCount) {
+      var contact = m_bodyContactBuffer[k];
+      var a = contact.index;
+      if (m_flagsBuffer.data[a] & ParticleType.b2_staticPressureParticle != 0) {
+        var b = contact.body;
+        var m = contact.mass;
+        var n = contact.normal;
+        var p = m_positionBuffer.data[a];
+        var v = b.getLinearVelocityFromWorldPoint(p).sub(m_velocityBuffer.data[a]);
+        var vn = Vec2.dot(v, n);
+        if (vn < 0) {
+          var f = n.mul(0.5 * m * vn);
+          m_velocityBuffer.data[a].addLocalVec(f.mul(getParticleInvMass()));
+          b.applyLinearImpulse(f.mul(-1), p, true);
+        }
+      }
     }
   }
 

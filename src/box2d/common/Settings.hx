@@ -204,6 +204,8 @@ class Settings {
      */
     public static var maxParticleWeight : Float = 5.0;
 
+    public static var maxParticlePressure : Float = 0.25;
+
     /**
      * The maximum distance between particles in a triad, divided by the particle radius.
      */

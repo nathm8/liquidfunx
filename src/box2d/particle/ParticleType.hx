@@ -27,5 +27,7 @@ package box2d.particle;
   public static var b2_destructionListener : Int = 1 << 9;
   /** impenetrable to other particles */
   public static var b2_barrierParticle : Int = 1 << 10;
+  /** impenetrable to other particles */
+  public static var b2_staticPressureParticle : Int = 1 << 11;
 }
 
